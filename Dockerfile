@@ -10,7 +10,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Persistent storage volume for sqlite db
-VOLUME ["/app/data"]
+# Persistent storage: attach a Railway Volume mounted at /app/data (configured in the Railway dashboard)
 
 CMD ["python", "run.py"]
