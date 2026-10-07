@@ -7,13 +7,13 @@ from bot.helpers import format_duration, COLOR_ACTIVE, COLOR_ENDED
 class HubStudyModal(ui.Modal, title="📖 Start Study Session"):
     subject_input = ui.TextInput(
         label="Subject",
-        placeholder="e.g. Mathematics, Physics, System Design",
+        placeholder="e.g. Constitutional Law, World History, Graphic Design, Biology",
         required=True,
         max_length=60
     )
     topic_input = ui.TextInput(
         label="Topic (Optional)",
-        placeholder="e.g. Linear Algebra, Chapter 4, React Hooks",
+        placeholder="e.g. Fundamental Rights, Renaissance Art, Figma Prototypes, Genetics",
         required=False,
         max_length=100
     )
@@ -195,9 +195,9 @@ class StudyHubCog:
 
         if not guild_sessions:
             embed.description = (
-                "Ready to focus? Hit the button below to start tracking your study session.\n\n"
-                "Each session gets its own thread for check-ins and controls — "
-                "keeping this channel clean and your progress organized."
+                "✨ **Small daily habits compound into massive achievements.**\n\n"
+                "Tap **Start Studying** below when you're ready to enter flow state. "
+                "Your timer, progress checks, and controls will live neatly inside your own session thread."
             )
         else:
             active_count = sum(1 for s in guild_sessions if s.status == "active")
@@ -205,13 +205,13 @@ class StudyHubCog:
 
             status_parts = []
             if active_count:
-                status_parts.append(f"🟢 {active_count} active")
+                status_parts.append(f"🟢 {active_count} in focus")
             if paused_count:
-                status_parts.append(f"🟡 {paused_count} paused")
+                status_parts.append(f"🟡 {paused_count} on break")
 
             embed.description = (
-                f"**{len(guild_sessions)}** study session{'s' if len(guild_sessions) != 1 else ''} "
-                f"in progress ({', '.join(status_parts)})\n"
+                f"🔥 **{len(guild_sessions)}** active focus session{'s' if len(guild_sessions) != 1 else ''} "
+                f"({', '.join(status_parts)})\n"
             )
 
             for s in guild_sessions:
@@ -219,17 +219,17 @@ class StudyHubCog:
                 name = user.display_name if user else f"User {s.user_id}"
                 elapsed = s.get_current_elapsed_seconds()
                 dur_str = format_duration(elapsed)
-                status_icon = "▶️" if s.status == "active" else "⏸️"
-                topic_str = f" ({s.topic})" if s.topic else ""
+                status_icon = "🟢" if s.status == "active" else "🟡"
+                topic_str = f" • *{s.topic}*" if s.topic else ""
                 thread_str = f" • <#{s.thread_id}>" if s.thread_id else ""
 
                 embed.add_field(
                     name=f"{status_icon} {name} — {s.subject}{topic_str}",
-                    value=f"⏱️ **{dur_str}**{thread_str}",
+                    value=f"⏱️ **{dur_str}** focused{thread_str}",
                     inline=False
                 )
 
-        embed.set_footer(text="Tracger • Click a button below to get started")
+        embed.set_footer(text="Tracger • Consistency beats intensity every single day")
         return embed
 
     async def update_hub(self, guild_id: int):

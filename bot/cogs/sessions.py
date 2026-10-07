@@ -12,13 +12,13 @@ from bot.helpers import (
 class StudyModal(ui.Modal, title="📖 Start Study Session"):
     subject_input = ui.TextInput(
         label="Subject",
-        placeholder="e.g. Mathematics, Physics, System Design",
+        placeholder="e.g. Constitutional Law, World History, Graphic Design, Biology",
         required=True,
         max_length=60
     )
     topic_input = ui.TextInput(
         label="Topic (Optional)",
-        placeholder="e.g. Linear Algebra, Chapter 4, React Hooks",
+        placeholder="e.g. Fundamental Rights, Renaissance Art, Figma Prototypes, Genetics",
         required=False,
         max_length=100
     )
@@ -44,13 +44,13 @@ class StudyModal(ui.Modal, title="📖 Start Study Session"):
 class SwitchModal(ui.Modal, title="🔄 Switch Subject / Topic"):
     subject_input = ui.TextInput(
         label="New Subject",
-        placeholder="e.g. Data Structures, Chemistry",
+        placeholder="e.g. Psychology, Macroeconomics, Literature",
         required=True,
         max_length=60
     )
     topic_input = ui.TextInput(
         label="New Topic (Optional)",
-        placeholder="e.g. Binary Trees, Thermodynamics",
+        placeholder="e.g. Cognitive Biases, Monetary Policy, Poetry Analysis",
         required=False,
         max_length=100
     )
@@ -282,7 +282,9 @@ class SessionsCog:
                 await interaction.response.send_message("❌ No active session to end.", ephemeral=True)
                 return
 
-            await interaction.response.defer()
+            # If inside the session thread, respond publicly within the thread; otherwise keep ephemeral
+            is_inside_thread = (session.thread_id is not None and interaction.channel_id == session.thread_id)
+            await interaction.response.defer(ephemeral=not is_inside_thread)
             await self.end_session_internal(interaction)
 
     async def _create_session_thread(self, interaction: discord.Interaction, user: discord.User | discord.Member, subject: str, topic: str | None) -> discord.Thread | None:
@@ -316,14 +318,28 @@ class SessionsCog:
             thread_name = thread_name[:97] + "..."
 
         try:
+            # 1. Try private thread first (Discord NEVER posts an announcement in the channel for private threads!)
             thread = await target_channel.create_thread(
                 name=thread_name,
-                type=discord.ChannelType.public_thread,
-                auto_archive_duration=60  # Auto-archive after 1h of inactivity
+                type=discord.ChannelType.private_thread,
+                auto_archive_duration=60
             )
             return thread
         except discord.Forbidden:
-            print("⚠️ Missing permission to create thread. Bot needs 'Create Public Threads' and 'Send Messages in Threads'. Falling back to channel messages.")
+            print("⚠️ Private thread forbidden: Tracger needs 'Create Private Threads' permission in Discord to prevent channel announcement cards.")
+        except Exception as e:
+            print(f"⚠️ Private thread failed: {e}")
+
+        try:
+            # 2. Fallback to public thread if server/permissions disallow private threads
+            thread = await target_channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.public_thread,
+                auto_archive_duration=60
+            )
+            return thread
+        except discord.Forbidden:
+            print("⚠️ Public thread forbidden: Tracger needs 'Create Public Threads' and 'Send Messages in Threads'. Falling back to channel messages.")
             return None
         except Exception as e:
             print(f"Failed to create session thread: {e}")
@@ -528,33 +544,61 @@ class SessionsCog:
             daily_goal_minutes=summary["daily_goal_minutes"]
         )
 
-        # Post summary in the thread if it exists
+        # Handle thread cleanup and summary delivery
         if session.thread_id:
             thread = self.bot.get_channel(session.thread_id)
             if thread:
                 if interaction.channel_id == session.thread_id:
+                    # User clicked End inside the thread: post summary, then delete thread to clear channel clutter
                     try:
                         await interaction.followup.send(embed=embed)
-                        await thread.send("📦 *Session complete! This thread is archived.*")
+                        await thread.send("🗑️ *Session complete! This throwaway thread will self-destruct in 10 seconds to keep the hub clean.*")
                     except Exception:
                         pass
+
+                    async def _delayed_thread_delete(th):
+                        import asyncio
+                        await asyncio.sleep(10)
+                        try:
+                            await th.delete(reason="Tracger study session ended - throwaway cleanup")
+                        except Exception:
+                            pass
+
+                    import asyncio
+                    asyncio.create_task(_delayed_thread_delete(thread))
                 else:
+                    # User clicked End from the Hub panel or slash command outside the thread
                     try:
-                        await thread.send(embed=embed)
-                        await thread.send("📦 *Session complete! This thread is archived.*")
+                        if interaction.response.is_done():
+                            # Send summary and auto-dissolve after 15s to leave the hub spotless
+                            msg = await interaction.followup.send(embed=embed, wait=True)
+                            if msg:
+                                async def _auto_dissolve_msg(m):
+                                    import asyncio
+                                    await asyncio.sleep(15)
+                                    try:
+                                        await m.delete()
+                                    except Exception:
+                                        pass
+                                import asyncio
+                                asyncio.create_task(_auto_dissolve_msg(msg))
+                        else:
+                            await interaction.response.send_message(embed=embed, ephemeral=True)
                     except Exception:
                         pass
+
+                    # Immediately delete throwaway thread so the starter card dissolves from the channel
                     try:
-                        await interaction.followup.send(embed=embed)
+                        await thread.delete(reason="Tracger study session ended - throwaway cleanup")
                     except Exception:
                         pass
-                try:
-                    await thread.edit(archived=True, locked=True)
-                except Exception:
-                    pass
         else:
+            # Fallback if thread creation failed: send embed ephemerally
             try:
-                await interaction.followup.send(embed=embed)
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                else:
+                    await interaction.response.send_message(embed=embed, ephemeral=True)
             except Exception:
                 pass
 
