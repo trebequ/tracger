@@ -8,6 +8,7 @@ class Config:
     guild_id: int | None = None
     study_channel_ids: list[int] = field(default_factory=list)
     daily_log_channel_id: int | None = None
+    summary_channel_id: int | None = None
     checkin_interval_minutes: int = 60
     db_path: str = "data/tracger.db"
 
@@ -29,6 +30,9 @@ class Config:
         raw_daily = os.getenv("DAILY_LOG_CHANNEL_ID", "").strip()
         daily_log_channel = int(raw_daily) if raw_daily.isdigit() else None
 
+        raw_summary = os.getenv("SUMMARY_CHANNEL_ID", os.getenv("SESSION_LOG_CHANNEL_ID", "")).strip()
+        summary_channel = int(raw_summary) if raw_summary.isdigit() else None
+
         raw_interval = os.getenv("CHECKIN_INTERVAL_MINUTES", "60").strip()
         checkin_interval = int(raw_interval) if raw_interval.isdigit() else 60
 
@@ -41,6 +45,7 @@ class Config:
             guild_id=guild_id,
             study_channel_ids=study_channels,
             daily_log_channel_id=daily_log_channel,
+            summary_channel_id=summary_channel,
             checkin_interval_minutes=max(5, checkin_interval),
             db_path=db_path,
         )

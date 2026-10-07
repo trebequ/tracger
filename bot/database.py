@@ -85,6 +85,14 @@ class Database:
                 );
             """)
 
+            # Dedicated session summary channel
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS summary_channels (
+                    guild_id   INTEGER PRIMARY KEY,
+                    channel_id INTEGER NOT NULL
+                );
+            """)
+
             await db.commit()
 
     async def upsert_user(self, user_id: int, display_name: str):
@@ -517,6 +525,75 @@ class Database:
             """, (guild_id,))
             row = await cursor.fetchone()
             return (row["channel_id"], row["message_id"]) if row else None
+
+    async def set_summary_channel(self, guild_id: int, channel_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO summary_channels (guild_id, channel_id)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id;
+            """, (guild_id, channel_id))
+            await db.commit()
+
+    async def get_summary_channel(self, guild_id: int) -> int | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT channel_id FROM summary_channels WHERE guild_id = ?;
+            """, (guild_id,))
+            row = await cursor.fetchone()
+            return row["channel_id"] if row else None
+
+    async def get_latest_completed_session(self, user_id: int) -> dict | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT session_id, user_id, guild_id, subject, topic, total_seconds, start_time, end_time
+                FROM sessions
+                WHERE user_id = ? AND status = 'completed'
+                ORDER BY session_id DESC LIMIT 1;
+            """, (user_id,))
+            session_row = await cursor.fetchone()
+            if not session_row:
+                return None
+
+            session_id = session_row["session_id"]
+
+            cursor = await db.execute("""
+                SELECT COUNT(*) as seg_count FROM segments WHERE session_id = ?;
+            """, (session_id,))
+            seg_row = await cursor.fetchone()
+            segment_count = seg_row["seg_count"] if seg_row else 1
+
+            cursor = await db.execute("""
+                SELECT
+                    COUNT(*) as total_checkins,
+                    SUM(CASE WHEN responded = 1 THEN 1 ELSE 0 END) as done_checkins
+                FROM checkins WHERE session_id = ?;
+            """, (session_id,))
+            check_row = await cursor.fetchone()
+            total_checkins = check_row["total_checkins"] if check_row else 0
+            done_checkins = check_row["done_checkins"] if (check_row and check_row["done_checkins"]) else 0
+
+        streak, longest = await self.update_streak(user_id)
+        today_total = await self.get_today_total_seconds(user_id)
+        goal = await self.get_daily_goal(user_id)
+
+        return {
+            "session_id": session_id,
+            "user_id": user_id,
+            "guild_id": session_row["guild_id"],
+            "subject": session_row["subject"],
+            "topic": session_row["topic"],
+            "total_seconds": session_row["total_seconds"],
+            "segment_count": segment_count,
+            "checkins_done": done_checkins,
+            "checkins_total": total_checkins,
+            "current_streak": streak,
+            "longest_streak": longest,
+            "today_total_seconds": today_total,
+            "daily_goal_minutes": goal
+        }
 
     async def export_all(self) -> dict:
         """Exports entire database as JSON dictionary for easy backup."""
