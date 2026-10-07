@@ -93,6 +93,14 @@ class Database:
                 );
             """)
 
+            # Dedicated daily log & backup channels per guild
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS daily_log_channels (
+                    guild_id   INTEGER PRIMARY KEY,
+                    channel_id INTEGER NOT NULL
+                );
+            """)
+
             await db.commit()
 
     async def upsert_user(self, user_id: int, display_name: str):
@@ -543,6 +551,33 @@ class Database:
             """, (guild_id,))
             row = await cursor.fetchone()
             return row["channel_id"] if row else None
+
+    async def set_daily_log_channel(self, guild_id: int, channel_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO daily_log_channels (guild_id, channel_id)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id;
+            """, (guild_id, channel_id))
+            await db.commit()
+
+    async def get_daily_log_channel(self, guild_id: int) -> int | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT channel_id FROM daily_log_channels WHERE guild_id = ?;
+            """, (guild_id,))
+            row = await cursor.fetchone()
+            return row["channel_id"] if row else None
+
+    async def get_all_daily_log_channels(self) -> list[tuple[int, int]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT guild_id, channel_id FROM daily_log_channels;
+            """)
+            rows = await cursor.fetchall()
+            return [(r["guild_id"], r["channel_id"]) for r in rows]
 
     async def get_latest_completed_session(self, user_id: int) -> dict | None:
         async with aiosqlite.connect(self.db_path) as db:
