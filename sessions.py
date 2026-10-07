@@ -325,8 +325,10 @@ class SessionsCog:
                 auto_archive_duration=60
             )
             return thread
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+        except discord.Forbidden:
+            print("⚠️ Private thread forbidden: Tracger needs 'Create Private Threads' permission in Discord to prevent channel announcement cards.")
+        except Exception as e:
+            print(f"⚠️ Private thread failed: {e}")
 
         try:
             # 2. Fallback to public thread if server/permissions disallow private threads
@@ -337,7 +339,7 @@ class SessionsCog:
             )
             return thread
         except discord.Forbidden:
-            print("⚠️ Missing permission to create thread. Bot needs 'Create Public Threads' / 'Create Private Threads' and 'Send Messages in Threads'. Falling back to channel messages.")
+            print("⚠️ Public thread forbidden: Tracger needs 'Create Public Threads' and 'Send Messages in Threads'. Falling back to channel messages.")
             return None
         except Exception as e:
             print(f"Failed to create session thread: {e}")
@@ -565,16 +567,27 @@ class SessionsCog:
                     import asyncio
                     asyncio.create_task(_delayed_thread_delete(thread))
                 else:
-                    # User clicked End from the Hub panel outside the thread
+                    # User clicked End from the Hub panel or slash command outside the thread
                     try:
                         if interaction.response.is_done():
-                            await interaction.followup.send(embed=embed, ephemeral=True)
+                            # Send summary and auto-dissolve after 15s to leave the hub spotless
+                            msg = await interaction.followup.send(embed=embed, wait=True)
+                            if msg:
+                                async def _auto_dissolve_msg(m):
+                                    import asyncio
+                                    await asyncio.sleep(15)
+                                    try:
+                                        await m.delete()
+                                    except Exception:
+                                        pass
+                                import asyncio
+                                asyncio.create_task(_auto_dissolve_msg(msg))
                         else:
                             await interaction.response.send_message(embed=embed, ephemeral=True)
                     except Exception:
                         pass
 
-                    # Immediately delete throwaway thread so no card lingers in the main channel
+                    # Immediately delete throwaway thread so the starter card dissolves from the channel
                     try:
                         await thread.delete(reason="Tracger study session ended - throwaway cleanup")
                     except Exception:
