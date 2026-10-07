@@ -66,9 +66,63 @@ class SwitchModal(ui.Modal, title="🔄 Switch Subject / Topic"):
             new_topic=self.topic_input.value.strip() or None
         )
 
+class ThreadControlView(ui.View):
+    """Session controls displayed inside the user's session thread."""
+    def __init__(self, cog: "SessionsCog", user_id: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "⚠️ This session belongs to another member.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    @ui.button(label="⏸️ Pause", style=discord.ButtonStyle.secondary, custom_id="thread_pause")
+    async def toggle_pause_button(self, interaction: discord.Interaction, button: ui.Button):
+        session = self.cog.bot.active_sessions.get(self.user_id)
+        if not session:
+            await interaction.response.send_message("❌ No active session found.", ephemeral=True)
+            return
+
+        if session.status == "active":
+            await self.cog.pause_session_internal(self.user_id)
+            button.label = "▶️ Resume"
+            button.style = discord.ButtonStyle.success
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send("⏸️ Timer paused. Take a well-deserved breather!", ephemeral=True)
+        else:
+            await self.cog.resume_session_internal(self.user_id)
+            button.label = "⏸️ Pause"
+            button.style = discord.ButtonStyle.secondary
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send("▶️ Timer resumed. Let's get focused!", ephemeral=True)
+
+        await self.cog.bot.refresh_dashboard(session.guild_id)
+        await self.cog.bot.refresh_hub(session.guild_id)
+
+    @ui.button(label="🔄 Switch", style=discord.ButtonStyle.primary, custom_id="thread_switch")
+    async def switch_button(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(SwitchModal(self.cog))
+
+    @ui.button(label="✅ Check-in", style=discord.ButtonStyle.success, custom_id="thread_checkin")
+    async def checkin_button(self, interaction: discord.Interaction, button: ui.Button):
+        await self.cog.bot.checkin_cog.do_manual_checkin(interaction)
+
+    @ui.button(label="⏹️ End Session", style=discord.ButtonStyle.danger, custom_id="thread_end")
+    async def end_button(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer()
+        await self.cog.end_session_internal(interaction)
+
+
+# Keep the old SessionControlView for /status and /study fallback (non-hub usage)
 class SessionControlView(ui.View):
     def __init__(self, cog: "SessionsCog", user_id: int):
-        super().__init__(timeout=None)  # Persistent across restarts if registered
+        super().__init__(timeout=None)
         self.cog = cog
         self.user_id = user_id
 
@@ -102,6 +156,7 @@ class SessionControlView(ui.View):
             await interaction.followup.send("▶️ Timer resumed. Let's get focused!", ephemeral=True)
 
         await self.cog.bot.refresh_dashboard(session.guild_id)
+        await self.cog.bot.refresh_hub(session.guild_id)
 
     @ui.button(label="🔄 Switch", style=discord.ButtonStyle.primary, custom_id="session_switch")
     async def switch_button(self, interaction: discord.Interaction, button: ui.Button):
@@ -115,6 +170,7 @@ class SessionControlView(ui.View):
     async def end_button(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.defer()
         await self.cog.end_session_internal(interaction)
+
 
 class SessionsCog:
     def __init__(self, bot):
@@ -162,6 +218,7 @@ class SessionsCog:
             await self.pause_session_internal(interaction.user.id)
             await interaction.response.send_message("⏸️ Study timer **paused**. Use `/resume` when you are back!", ephemeral=True)
             await self.bot.refresh_dashboard(interaction.guild_id)
+            await self.bot.refresh_hub(interaction.guild_id)
 
         @tree.command(name="resume", description="Resume your paused study timer")
         async def resume_command(interaction: discord.Interaction):
@@ -176,6 +233,7 @@ class SessionsCog:
             await self.resume_session_internal(interaction.user.id)
             await interaction.response.send_message("▶️ Study timer **resumed**! Keep up the great work.", ephemeral=True)
             await self.bot.refresh_dashboard(interaction.guild_id)
+            await self.bot.refresh_hub(interaction.guild_id)
 
         @tree.command(name="switch", description="Change your subject or topic mid-session")
         @app_commands.describe(
@@ -227,6 +285,50 @@ class SessionsCog:
             await interaction.response.defer()
             await self.end_session_internal(interaction)
 
+    async def _create_session_thread(self, interaction: discord.Interaction, user: discord.User | discord.Member, subject: str, topic: str | None) -> discord.Thread | None:
+        """
+        Creates a thread for the session in the hub channel (preferred) or the interaction channel.
+        Returns the thread or None if creation fails.
+        """
+        guild_id = interaction.guild_id or 0
+
+        # Try to use the hub channel if one exists
+        hub_record = await self.bot.db.get_hub_message(guild_id)
+        if hub_record:
+            target_channel = self.bot.get_channel(hub_record[0])
+        else:
+            target_channel = interaction.channel
+
+        if not target_channel:
+            return None
+
+        # If current target is already a thread, use its parent channel
+        if isinstance(target_channel, discord.Thread):
+            target_channel = target_channel.parent
+
+        if not target_channel or not hasattr(target_channel, 'create_thread'):
+            return None
+
+        topic_str = f" — {topic}" if topic else ""
+        thread_name = f"📖 {user.display_name} — {subject}{topic_str}"
+        # Truncate to Discord's 100-char thread name limit
+        if len(thread_name) > 100:
+            thread_name = thread_name[:97] + "..."
+
+        try:
+            thread = await target_channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.public_thread,
+                auto_archive_duration=60  # Auto-archive after 1h of inactivity
+            )
+            return thread
+        except discord.Forbidden:
+            print("⚠️ Missing permission to create thread. Bot needs 'Create Public Threads' and 'Send Messages in Threads'. Falling back to channel messages.")
+            return None
+        except Exception as e:
+            print(f"Failed to create session thread: {e}")
+            return None
+
     async def start_session_from_inputs(
         self,
         interaction: discord.Interaction,
@@ -271,18 +373,50 @@ class SessionsCog:
         )
         self.bot.active_sessions[user.id] = state
 
+        # Create a session thread
+        thread = await self._create_session_thread(interaction, user, subject, topic)
+        if thread:
+            state.thread_id = thread.id
+
         # Schedule check-in reminders
         self.bot.checkin_cog.schedule_reminder(state)
 
+        # Send start confirmation
         embed = build_session_start_embed(user, subject, topic, planned_mins)
-        view = SessionControlView(self, user.id)
 
-        if not interaction.response.is_done():
-            await interaction.response.send_message(embed=embed, view=view)
+        if thread:
+            # Acknowledge the interaction with a pointer to the thread
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"✅ Session started! Head to your session thread: {thread.mention}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"✅ Session started! Head to your session thread: {thread.mention}",
+                    ephemeral=True
+                )
+
+            # Post the full session embed + controls inside the thread, mentioning user to auto-join
+            thread_view = ThreadControlView(self, user.id)
+            await thread.send(content=f"<@{user.id}>", embed=embed, view=thread_view)
+
+            # Add duration info for check-in context
+            if planned_mins:
+                checkin_info = f"⏱️ Planned: **{format_duration(planned_mins * 60)}** • Check-ins based on session length"
+            else:
+                checkin_info = "⏱️ Open-ended session • First check-in in **30 minutes**, then every **25 minutes**"
+            await thread.send(checkin_info)
         else:
-            await interaction.followup.send(embed=embed, view=view)
+            # No thread — fall back to inline response
+            view = SessionControlView(self, user.id)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=embed, view=view)
+            else:
+                await interaction.followup.send(embed=embed, view=view)
 
         await self.bot.refresh_dashboard(guild_id)
+        await self.bot.refresh_hub(guild_id)
 
     async def pause_session_internal(self, user_id: int, reason: str = ""):
         session = self.bot.active_sessions.get(user_id)
@@ -342,12 +476,27 @@ class SessionsCog:
         )
 
         msg = f"🔄 Switched focus from **{old_subject}** to **{new_subject}** ({new_topic or 'General'})!"
+
+        # Also update the thread name if we have one
+        if session.thread_id:
+            thread = self.bot.get_channel(session.thread_id)
+            if thread:
+                topic_str = f" — {new_topic}" if new_topic else ""
+                new_name = f"📖 {interaction.user.display_name} — {new_subject}{topic_str}"
+                if len(new_name) > 100:
+                    new_name = new_name[:97] + "..."
+                try:
+                    await thread.edit(name=new_name)
+                except Exception:
+                    pass
+
         if not interaction.response.is_done():
             await interaction.response.send_message(msg, ephemeral=True)
         else:
             await interaction.followup.send(msg, ephemeral=True)
 
         await self.bot.refresh_dashboard(session.guild_id)
+        await self.bot.refresh_hub(session.guild_id)
 
     async def end_session_internal(self, interaction: discord.Interaction):
         user_id = interaction.user.id
@@ -379,17 +528,49 @@ class SessionsCog:
             daily_goal_minutes=summary["daily_goal_minutes"]
         )
 
-        await interaction.followup.send(embed=embed)
+        # Post summary in the thread if it exists
+        if session.thread_id:
+            thread = self.bot.get_channel(session.thread_id)
+            if thread:
+                if interaction.channel_id == session.thread_id:
+                    try:
+                        await interaction.followup.send(embed=embed)
+                        await thread.send("📦 *Session complete! This thread is archived.*")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await thread.send(embed=embed)
+                        await thread.send("📦 *Session complete! This thread is archived.*")
+                    except Exception:
+                        pass
+                    try:
+                        await interaction.followup.send(embed=embed)
+                    except Exception:
+                        pass
+                try:
+                    await thread.edit(archived=True, locked=True)
+                except Exception:
+                    pass
+        else:
+            try:
+                await interaction.followup.send(embed=embed)
+            except Exception:
+                pass
+
         await self.bot.refresh_dashboard(session.guild_id)
+        await self.bot.refresh_hub(session.guild_id)
 
         # Check if user reached their daily goal in this session
         if summary["daily_goal_minutes"] > 0:
             goal_secs = summary["daily_goal_minutes"] * 60
             if summary["today_total_seconds"] >= goal_secs:
                 try:
-                    await interaction.channel.send(
-                        f"🏆 **Goal Achieved!** <@{user_id}> reached their daily study target of "
-                        f"**{format_duration(goal_secs)}** today! Outstanding commitment! 🔥"
-                    )
+                    channel = self.bot.get_channel(session.channel_id)
+                    if channel:
+                        await channel.send(
+                            f"🏆 **Goal Achieved!** <@{user_id}> reached their daily study target of "
+                            f"**{format_duration(goal_secs)}** today! Outstanding commitment! 🔥"
+                        )
                 except Exception:
                     pass

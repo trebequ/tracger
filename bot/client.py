@@ -22,6 +22,9 @@ class SessionState:
     status: str = "active"  # "active" | "paused"
     checkin_task: asyncio.Task | None = None
     latest_checkin_id: int | None = None
+    thread_id: int | None = None
+    checkin_count: int = 0
+    missed_checkins: int = 0
 
     def get_current_elapsed_seconds(self) -> int:
         """Calculates live seconds elapsed including current active segment."""
@@ -57,6 +60,7 @@ class TracgerBot(discord.Client):
         from bot.cogs.goals import GoalsCog
         from bot.cogs.dashboard import DashboardCog
         from bot.cogs.daily_report import DailyReportCog
+        from bot.cogs.study_hub import StudyHubCog
 
         self.sessions_cog = SessionsCog(self)
         self.checkin_cog = CheckinCog(self)
@@ -64,6 +68,7 @@ class TracgerBot(discord.Client):
         self.goals_cog = GoalsCog(self)
         self.dashboard_cog = DashboardCog(self)
         self.daily_report_cog = DailyReportCog(self)
+        self.study_hub_cog = StudyHubCog(self)
 
         await self.sessions_cog.setup()
         await self.checkin_cog.setup()
@@ -71,6 +76,7 @@ class TracgerBot(discord.Client):
         await self.goals_cog.setup()
         await self.dashboard_cog.setup()
         await self.daily_report_cog.setup()
+        await self.study_hub_cog.setup()
 
         # 3. Slash command syncing
         if self.config.guild_id:
@@ -111,10 +117,15 @@ class TracgerBot(discord.Client):
             if session.status == "active":
                 # Auto-pause to preserve accuracy
                 await self.sessions_cog.pause_session_internal(member.id, reason="Left voice channel")
-                channel = self.get_channel(session.channel_id)
-                if channel:
+                # Send pause notification to thread if available, else original channel
+                target_channel = None
+                if session.thread_id:
+                    target_channel = self.get_channel(session.thread_id)
+                if not target_channel:
+                    target_channel = self.get_channel(session.channel_id)
+                if target_channel:
                     try:
-                        await channel.send(
+                        await target_channel.send(
                             f"⏸️ **{member.display_name}** left the voice channel. "
                             f"Your study timer has been automatically **paused**! "
                             f"Hop back in and use `/resume` whenever you're ready.",
@@ -128,3 +139,8 @@ class TracgerBot(discord.Client):
         """Notifies the dashboard cog to re-render the live active study board."""
         if hasattr(self, "dashboard_cog"):
             await self.dashboard_cog.update_dashboard(guild_id)
+
+    async def refresh_hub(self, guild_id: int):
+        """Notifies the study hub cog to re-render the persistent hub panel."""
+        if hasattr(self, "study_hub_cog"):
+            await self.study_hub_cog.update_hub(guild_id)

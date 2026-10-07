@@ -76,6 +76,15 @@ class Database:
                 );
             """)
 
+            # Persistent Study Hub message trackers
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS hub_messages (
+                    guild_id   INTEGER PRIMARY KEY,
+                    channel_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL
+                );
+            """)
+
             await db.commit()
 
     async def upsert_user(self, user_id: int, display_name: str):
@@ -485,6 +494,26 @@ class Database:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("""
                 SELECT channel_id, message_id FROM dashboard_messages WHERE guild_id = ?;
+            """, (guild_id,))
+            row = await cursor.fetchone()
+            return (row["channel_id"], row["message_id"]) if row else None
+
+    async def set_hub_message(self, guild_id: int, channel_id: int, message_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO hub_messages (guild_id, channel_id, message_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    message_id = excluded.message_id;
+            """, (guild_id, channel_id, message_id))
+            await db.commit()
+
+    async def get_hub_message(self, guild_id: int) -> tuple[int, int] | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT channel_id, message_id FROM hub_messages WHERE guild_id = ?;
             """, (guild_id,))
             row = await cursor.fetchone()
             return (row["channel_id"], row["message_id"]) if row else None
