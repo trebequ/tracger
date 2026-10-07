@@ -318,14 +318,26 @@ class SessionsCog:
             thread_name = thread_name[:97] + "..."
 
         try:
+            # 1. Try private thread first (Discord NEVER posts an announcement in the channel for private threads!)
+            thread = await target_channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.private_thread,
+                auto_archive_duration=60
+            )
+            return thread
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+        try:
+            # 2. Fallback to public thread if server/permissions disallow private threads
             thread = await target_channel.create_thread(
                 name=thread_name,
                 type=discord.ChannelType.public_thread,
-                auto_archive_duration=60  # Auto-archive after 1h of inactivity
+                auto_archive_duration=60
             )
             return thread
         except discord.Forbidden:
-            print("⚠️ Missing permission to create thread. Bot needs 'Create Public Threads' and 'Send Messages in Threads'. Falling back to channel messages.")
+            print("⚠️ Missing permission to create thread. Bot needs 'Create Public Threads' / 'Create Private Threads' and 'Send Messages in Threads'. Falling back to channel messages.")
             return None
         except Exception as e:
             print(f"Failed to create session thread: {e}")
@@ -530,34 +542,43 @@ class SessionsCog:
             daily_goal_minutes=summary["daily_goal_minutes"]
         )
 
-        # Post summary in the thread if it exists
+        # Handle thread cleanup and summary delivery
         if session.thread_id:
             thread = self.bot.get_channel(session.thread_id)
             if thread:
-                try:
-                    await thread.send(embed=embed)
-                    await thread.send("📦 *Session complete! This thread is archived.*")
-                    await thread.edit(archived=True, locked=True)
-                except Exception:
-                    pass
+                if interaction.channel_id == session.thread_id:
+                    # User clicked End inside the thread: post summary, then delete thread to clear channel clutter
+                    try:
+                        await interaction.followup.send(embed=embed)
+                        await thread.send("🗑️ *Session complete! This throwaway thread will self-destruct in 10 seconds to keep the hub clean.*")
+                    except Exception:
+                        pass
 
-            # Acknowledge the interaction cleanly without dropping an embed in the main channel
-            if interaction.channel_id == session.thread_id:
-                pass  # Already delivered directly inside the thread
-            else:
-                try:
-                    if interaction.response.is_done():
-                        await interaction.followup.send(
-                            f"🎉 **Session complete!** Summary and metrics saved in your archived thread: <#{session.thread_id}>",
-                            ephemeral=True
-                        )
-                    else:
-                        await interaction.response.send_message(
-                            f"🎉 **Session complete!** Summary and metrics saved in your archived thread: <#{session.thread_id}>",
-                            ephemeral=True
-                        )
-                except Exception:
-                    pass
+                    async def _delayed_thread_delete(th):
+                        import asyncio
+                        await asyncio.sleep(10)
+                        try:
+                            await th.delete(reason="Tracger study session ended - throwaway cleanup")
+                        except Exception:
+                            pass
+
+                    import asyncio
+                    asyncio.create_task(_delayed_thread_delete(thread))
+                else:
+                    # User clicked End from the Hub panel outside the thread
+                    try:
+                        if interaction.response.is_done():
+                            await interaction.followup.send(embed=embed, ephemeral=True)
+                        else:
+                            await interaction.response.send_message(embed=embed, ephemeral=True)
+                    except Exception:
+                        pass
+
+                    # Immediately delete throwaway thread so no card lingers in the main channel
+                    try:
+                        await thread.delete(reason="Tracger study session ended - throwaway cleanup")
+                    except Exception:
+                        pass
         else:
             # Fallback if thread creation failed: send embed ephemerally
             try:
