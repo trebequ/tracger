@@ -534,30 +534,37 @@ class SessionsCog:
         if session.thread_id:
             thread = self.bot.get_channel(session.thread_id)
             if thread:
-                if interaction.channel_id == session.thread_id:
-                    try:
-                        await interaction.followup.send(embed=embed)
-                        await thread.send("📦 *Session complete! This thread is archived.*")
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        await thread.send(embed=embed)
-                        await thread.send("📦 *Session complete! This thread is archived.*")
-                    except Exception:
-                        pass
-                    try:
-                        await interaction.followup.send(embed=embed, ephemeral=True)
-                    except Exception:
-                        pass
                 try:
+                    await thread.send(embed=embed)
+                    await thread.send("📦 *Session complete! This thread is archived.*")
                     await thread.edit(archived=True, locked=True)
                 except Exception:
                     pass
+
+            # Acknowledge the interaction cleanly without dropping an embed in the main channel
+            if interaction.channel_id == session.thread_id:
+                pass  # Already delivered directly inside the thread
+            else:
+                try:
+                    if interaction.response.is_done():
+                        await interaction.followup.send(
+                            f"🎉 **Session complete!** Summary and metrics saved in your archived thread: <#{session.thread_id}>",
+                            ephemeral=True
+                        )
+                    else:
+                        await interaction.response.send_message(
+                            f"🎉 **Session complete!** Summary and metrics saved in your archived thread: <#{session.thread_id}>",
+                            ephemeral=True
+                        )
+                except Exception:
+                    pass
         else:
+            # Fallback if thread creation failed: send embed ephemerally
             try:
-                # If no thread existed, send ephemerally if from hub/command or normal followup
-                await interaction.followup.send(embed=embed, ephemeral=True)
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                else:
+                    await interaction.response.send_message(embed=embed, ephemeral=True)
             except Exception:
                 pass
 
