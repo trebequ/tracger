@@ -26,11 +26,34 @@ class DailyReportCog:
             else:
                 await interaction.followup.send("⚠️ Could not generate report. Check bot permissions.", ephemeral=True)
 
-        # Start the 10:00 PM IST background loop
+        @tree.command(name="dailylogchannel", description="Set or view the channel where the daily 11:00 PM IST report & backup are sent")
+        @app_commands.describe(channel="Text channel to receive daily reports and backups (leave empty to view current)")
+        async def dailylogchannel_command(interaction: discord.Interaction, channel: discord.TextChannel | None = None):
+            guild_id = interaction.guild_id or 0
+            if channel:
+                await self.bot.db.set_daily_log_channel(guild_id, channel.id)
+                await interaction.response.send_message(
+                    f"✅ Daily 11:00 PM IST study recaps and automated database backups will now be posted to {channel.mention}!",
+                    ephemeral=True
+                )
+            else:
+                ch_id = await self.bot.db.get_daily_log_channel(guild_id) or self.bot.config.daily_log_channel_id
+                if ch_id:
+                    await interaction.response.send_message(
+                        f"📢 Current daily log channel for this server: <#{ch_id}>",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "ℹ️ No daily log channel set yet for this server. Use `/dailylogchannel #channel` to configure one!",
+                        ephemeral=True
+                    )
+
+        # Start the 11:00 PM IST background loop
         self.report_task = asyncio.create_task(self._daily_schedule_loop())
 
     async def _daily_schedule_loop(self):
-        """Runs indefinitely, firing every day at 10:00 PM IST (16:30 UTC)."""
+        """Runs indefinitely, firing every day at 11:00 PM IST (17:30 UTC)."""
         await self.bot.wait_until_ready()
 
         while not self.bot.is_closed():
@@ -46,13 +69,34 @@ class DailyReportCog:
 
             try:
                 await asyncio.sleep(sleep_seconds)
-                await self.send_daily_report()
+                await self.dispatch_all_daily_reports()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"Error in daily report loop: {e}")
                 # Wait 60s before retrying to prevent tight crash loop
                 await asyncio.sleep(60)
+
+    async def dispatch_all_daily_reports(self):
+        """Dispatches daily report & backup to all configured guild channels."""
+        sent_channel_ids = set()
+
+        # 1. Dispatch to all channels stored in database across guilds
+        try:
+            configured = await self.bot.db.get_all_daily_log_channels()
+            for guild_id, channel_id in configured:
+                channel = self.bot.get_channel(channel_id)
+                if channel:
+                    await self.send_daily_report(channel_override=channel)
+                    sent_channel_ids.add(channel_id)
+        except Exception as e:
+            print(f"Error dispatching db daily reports: {e}")
+
+        # 2. Fallback to env-configured daily_log_channel_id if not already sent
+        if self.bot.config.daily_log_channel_id and self.bot.config.daily_log_channel_id not in sent_channel_ids:
+            channel = self.bot.get_channel(self.bot.config.daily_log_channel_id)
+            if channel:
+                await self.send_daily_report(channel_override=channel)
 
     async def send_daily_report(self, channel_override: discord.TextChannel | None = None) -> bool:
         channel = channel_override
