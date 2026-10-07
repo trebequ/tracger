@@ -1,3 +1,4 @@
+import random
 from datetime import datetime, timezone
 import discord
 from discord import app_commands, ui
@@ -9,29 +10,43 @@ from bot.helpers import (
     build_session_summary_embed,
 )
 
-class StudyModal(ui.Modal, title="📖 Start Study Session"):
-    subject_input = ui.TextInput(
-        label="Subject",
-        placeholder="e.g. Constitutional Law, World History, Graphic Design, Biology",
-        required=True,
-        max_length=60
-    )
-    topic_input = ui.TextInput(
-        label="Topic (Optional)",
-        placeholder="e.g. Fundamental Rights, Renaissance Art, Figma Prototypes, Genetics",
-        required=False,
-        max_length=100
-    )
-    duration_input = ui.TextInput(
-        label="Planned Duration (Optional)",
-        placeholder="e.g. 2h, 1h30m, 45m (Leave empty for open-ended)",
-        required=False,
-        max_length=20
-    )
+# Rotating pairs with exactly 2 subjects and 2 topics
+MODAL_EXAMPLES = [
+    ("Law, World History", "Constitutional Rights, Cold War"),
+    ("Graphic Design, Economics", "Figma Layouts, Monetary Policy"),
+    ("Psychology, Literature", "Cognitive Biases, Poetry Analysis"),
+    ("Biochemistry, Linear Algebra", "Enzyme Kinetics, Vector Spaces"),
+    ("Philosophy, Sociology", "Stoic Ethics, Social Mobility"),
+    ("Architecture, Data Structures", "Urban Planning, Binary Trees"),
+]
 
+class StudyModal(ui.Modal, title="📖 Start Study Session"):
     def __init__(self, cog: "SessionsCog"):
         super().__init__()
         self.cog = cog
+        subjects, topics = random.choice(MODAL_EXAMPLES)
+
+        self.subject_input = ui.TextInput(
+            label="Subject",
+            placeholder=f"e.g. {subjects}",
+            required=True,
+            max_length=60
+        )
+        self.topic_input = ui.TextInput(
+            label="Topic (Optional)",
+            placeholder=f"e.g. {topics}",
+            required=False,
+            max_length=100
+        )
+        self.duration_input = ui.TextInput(
+            label="Planned Duration (Optional)",
+            placeholder="e.g. 2h, 1h30m, 45m (Leave empty for open-ended)",
+            required=False,
+            max_length=20
+        )
+        self.add_item(self.subject_input)
+        self.add_item(self.topic_input)
+        self.add_item(self.duration_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         await self.cog.start_session_from_inputs(
@@ -286,6 +301,55 @@ class SessionsCog:
             is_inside_thread = (session.thread_id is not None and interaction.channel_id == session.thread_id)
             await interaction.response.defer(ephemeral=not is_inside_thread)
             await self.end_session_internal(interaction)
+
+        @tree.command(name="summary", description="View your latest completed study session summary in this channel")
+        @app_commands.describe(member="Member to view summary for (leave blank for yourself)")
+        async def summary_command(interaction: discord.Interaction, member: discord.Member | None = None):
+            target = member or interaction.user
+            summary = await self.bot.db.get_latest_completed_session(target.id)
+            if not summary:
+                await interaction.response.send_message(
+                    f"ℹ️ No completed study sessions found for **{target.display_name}**.",
+                    ephemeral=True
+                )
+                return
+
+            embed = build_session_summary_embed(
+                user=target,
+                subject=summary["subject"],
+                topic=summary["topic"],
+                total_seconds=summary["total_seconds"],
+                segment_count=summary["segment_count"],
+                checkins_done=summary["checkins_done"],
+                checkins_total=summary["checkins_total"],
+                current_streak=summary["current_streak"],
+                daily_total_seconds=summary["today_total_seconds"],
+                daily_goal_minutes=summary["daily_goal_minutes"]
+            )
+            await interaction.response.send_message(embed=embed)
+
+        @tree.command(name="summarychannel", description="Set or view the channel where all completed session summaries are posted")
+        @app_commands.describe(channel="Text channel to receive session summaries (leave empty to view current)")
+        async def summarychannel_command(interaction: discord.Interaction, channel: discord.TextChannel | None = None):
+            guild_id = interaction.guild_id or 0
+            if channel:
+                await self.bot.db.set_summary_channel(guild_id, channel.id)
+                await interaction.response.send_message(
+                    f"✅ Session summaries will now automatically be posted to {channel.mention} whenever members finish studying!",
+                    ephemeral=True
+                )
+            else:
+                ch_id = await self.bot.db.get_summary_channel(guild_id) or self.bot.config.summary_channel_id
+                if ch_id:
+                    await interaction.response.send_message(
+                        f"📢 Current session summary channel: <#{ch_id}>",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "ℹ️ No summary channel set yet. Use `/summarychannel #channel` to configure one!",
+                        ephemeral=True
+                    )
 
     async def _create_session_thread(self, interaction: discord.Interaction, user: discord.User | discord.Member, subject: str, topic: str | None) -> discord.Thread | None:
         """
@@ -552,13 +616,13 @@ class SessionsCog:
                     # User clicked End inside the thread: post summary, then delete thread to clear channel clutter
                     try:
                         await interaction.followup.send(embed=embed)
-                        await thread.send("🗑️ *Session complete! This throwaway thread will self-destruct in 10 seconds to keep the hub clean.*")
+                        await thread.send("🗑️ *Session complete! This throwaway thread will self-destruct in 30 seconds to keep the server clean.*")
                     except Exception:
                         pass
 
                     async def _delayed_thread_delete(th):
                         import asyncio
-                        await asyncio.sleep(10)
+                        await asyncio.sleep(30)
                         try:
                             await th.delete(reason="Tracger study session ended - throwaway cleanup")
                         except Exception:
@@ -604,6 +668,19 @@ class SessionsCog:
 
         await self.bot.refresh_dashboard(session.guild_id)
         await self.bot.refresh_hub(session.guild_id)
+
+        # Post summary to the dedicated summary channel if configured
+        try:
+            summary_ch_id = await self.bot.db.get_summary_channel(session.guild_id)
+            if not summary_ch_id and self.bot.config.summary_channel_id:
+                summary_ch_id = self.bot.config.summary_channel_id
+
+            if summary_ch_id:
+                summary_ch = self.bot.get_channel(summary_ch_id)
+                if summary_ch and summary_ch.id != (session.thread_id or 0):
+                    await summary_ch.send(embed=embed)
+        except Exception as e:
+            print(f"Error posting to summary channel: {e}")
 
         # Check if user reached their daily goal in this session
         if summary["daily_goal_minutes"] > 0:

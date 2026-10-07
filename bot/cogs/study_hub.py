@@ -1,32 +1,47 @@
+import random
 from datetime import datetime, timezone
 import discord
 from discord import app_commands, ui
 from bot.helpers import format_duration, COLOR_ACTIVE, COLOR_ENDED
 
+# Rotating pairs with exactly 2 subjects and 2 topics
+MODAL_EXAMPLES = [
+    ("Law, World History", "Constitutional Rights, Cold War"),
+    ("Graphic Design, Economics", "Figma Layouts, Monetary Policy"),
+    ("Psychology, Literature", "Cognitive Biases, Poetry Analysis"),
+    ("Biochemistry, Linear Algebra", "Enzyme Kinetics, Vector Spaces"),
+    ("Philosophy, Sociology", "Stoic Ethics, Social Mobility"),
+    ("Architecture, Data Structures", "Urban Planning, Binary Trees"),
+]
+
 
 class HubStudyModal(ui.Modal, title="📖 Start Study Session"):
-    subject_input = ui.TextInput(
-        label="Subject",
-        placeholder="e.g. Constitutional Law, World History, Graphic Design, Biology",
-        required=True,
-        max_length=60
-    )
-    topic_input = ui.TextInput(
-        label="Topic (Optional)",
-        placeholder="e.g. Fundamental Rights, Renaissance Art, Figma Prototypes, Genetics",
-        required=False,
-        max_length=100
-    )
-    duration_input = ui.TextInput(
-        label="Planned Duration (Optional)",
-        placeholder="e.g. 2h, 1h30m, 45m (Leave empty for open-ended)",
-        required=False,
-        max_length=20
-    )
-
     def __init__(self, bot):
         super().__init__()
         self.bot = bot
+        subjects, topics = random.choice(MODAL_EXAMPLES)
+
+        self.subject_input = ui.TextInput(
+            label="Subject",
+            placeholder=f"e.g. {subjects}",
+            required=True,
+            max_length=60
+        )
+        self.topic_input = ui.TextInput(
+            label="Topic (Optional)",
+            placeholder=f"e.g. {topics}",
+            required=False,
+            max_length=100
+        )
+        self.duration_input = ui.TextInput(
+            label="Planned Duration (Optional)",
+            placeholder="e.g. 2h, 1h30m, 45m (Leave empty for open-ended)",
+            required=False,
+            max_length=20
+        )
+        self.add_item(self.subject_input)
+        self.add_item(self.topic_input)
+        self.add_item(self.duration_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         await self.bot.sessions_cog.start_session_from_inputs(
