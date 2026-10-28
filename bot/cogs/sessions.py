@@ -1,5 +1,6 @@
 import random
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timezone, timedelta
 import discord
 from discord import app_commands, ui
 from bot.helpers import (
@@ -83,10 +84,19 @@ class SwitchModal(ui.Modal, title="🔄 Switch Subject / Topic"):
 
 class ThreadControlView(ui.View):
     """Session controls displayed inside the user's session thread."""
-    def __init__(self, cog: "SessionsCog", user_id: int):
+    def __init__(self, cog: "SessionsCog", user_id: int, status: str = "active"):
         super().__init__(timeout=None)
         self.cog = cog
         self.user_id = user_id
+        self._update_pause_button(status)
+
+    def _update_pause_button(self, status: str):
+        if status == "paused":
+            self.toggle_pause_button.label = "▶️ Resume"
+            self.toggle_pause_button.style = discord.ButtonStyle.success
+        else:
+            self.toggle_pause_button.label = "⏸️ Pause"
+            self.toggle_pause_button.style = discord.ButtonStyle.secondary
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -106,14 +116,12 @@ class ThreadControlView(ui.View):
 
         if session.status == "active":
             await self.cog.pause_session_internal(self.user_id)
-            button.label = "▶️ Resume"
-            button.style = discord.ButtonStyle.success
+            self._update_pause_button("paused")
             await interaction.response.edit_message(view=self)
             await interaction.followup.send("⏸️ Timer paused. Take a well-deserved breather!", ephemeral=True)
         else:
             await self.cog.resume_session_internal(self.user_id)
-            button.label = "⏸️ Pause"
-            button.style = discord.ButtonStyle.secondary
+            self._update_pause_button("active")
             await interaction.response.edit_message(view=self)
             await interaction.followup.send("▶️ Timer resumed. Let's get focused!", ephemeral=True)
 
@@ -190,6 +198,7 @@ class SessionControlView(ui.View):
 class SessionsCog:
     def __init__(self, bot):
         self.bot = bot
+        self.auto_end_task: asyncio.Task | None = None
 
     async def setup(self):
         # Register slash commands
@@ -324,7 +333,8 @@ class SessionsCog:
                 checkins_total=summary["checkins_total"],
                 current_streak=summary["current_streak"],
                 daily_total_seconds=summary["today_total_seconds"],
-                daily_goal_minutes=summary["daily_goal_minutes"]
+                daily_goal_minutes=summary["daily_goal_minutes"],
+                planned_minutes=summary.get("planned_minutes")
             )
             await interaction.response.send_message(embed=embed)
 
@@ -350,6 +360,10 @@ class SessionsCog:
                         "ℹ️ No summary channel set yet. Use `/summarychannel #channel` to configure one!",
                         ephemeral=True
                     )
+
+        # Start 2:00 AM IST auto-end schedule loop
+        if not self.auto_end_task or self.auto_end_task.done():
+            self.auto_end_task = asyncio.create_task(self._auto_end_schedule_loop())
 
     async def _create_session_thread(self, interaction: discord.Interaction, user: discord.User | discord.Member, subject: str, topic: str | None) -> discord.Thread | None:
         """
@@ -478,8 +492,9 @@ class SessionsCog:
                 )
 
             # Post the full session embed + controls inside the thread, mentioning user to auto-join
-            thread_view = ThreadControlView(self, user.id)
-            await thread.send(content=f"<@{user.id}>", embed=embed, view=thread_view)
+            thread_view = ThreadControlView(self, user.id, status="active")
+            ctrl_msg = await thread.send(content=f"<@{user.id}>", embed=embed, view=thread_view)
+            state.control_message_id = ctrl_msg.id
 
             # Add duration info for check-in context
             if planned_mins:
@@ -497,6 +512,38 @@ class SessionsCog:
 
         await self.bot.refresh_dashboard(guild_id)
         await self.bot.refresh_hub(guild_id)
+
+    async def update_thread_control_panel(self, user_id: int):
+        """Updates the embed and buttons on the user's thread control message."""
+        session = self.bot.active_sessions.get(user_id)
+        if not session or not session.thread_id or not session.control_message_id:
+            return
+
+        thread = self.bot.get_channel(session.thread_id)
+        if not thread:
+            try:
+                thread = await self.bot.fetch_channel(session.thread_id)
+            except Exception:
+                return
+
+        try:
+            msg = await thread.fetch_message(session.control_message_id)
+            user = self.bot.get_user(user_id)
+            if not user:
+                user = await self.bot.fetch_user(user_id)
+
+            embed = build_session_start_embed(
+                user=user,
+                subject=session.subject,
+                topic=session.topic,
+                planned_minutes=session.planned_minutes,
+                status=session.status,
+                elapsed_seconds=session.get_current_elapsed_seconds()
+            )
+            view = ThreadControlView(self, user_id, status=session.status)
+            await msg.edit(embed=embed, view=view)
+        except Exception as e:
+            print(f"Failed to update thread control panel: {e}")
 
     async def pause_session_internal(self, user_id: int, reason: str = ""):
         session = self.bot.active_sessions.get(user_id)
@@ -519,6 +566,7 @@ class SessionsCog:
 
         # Cancel checkin reminder loop
         self.bot.checkin_cog.cancel_reminder(session)
+        await self.update_thread_control_panel(user_id)
 
     async def resume_session_internal(self, user_id: int):
         session = self.bot.active_sessions.get(user_id)
@@ -539,6 +587,7 @@ class SessionsCog:
 
         # Re-schedule checkin reminder
         self.bot.checkin_cog.schedule_reminder(session)
+        await self.update_thread_control_panel(user_id)
 
     async def switch_session_from_inputs(self, interaction: discord.Interaction, new_subject: str, new_topic: str | None):
         session = self.bot.active_sessions.get(interaction.user.id)
@@ -570,6 +619,9 @@ class SessionsCog:
                 except Exception:
                     pass
 
+        # Update the control panel embed in the thread so changes reflect immediately!
+        await self.update_thread_control_panel(interaction.user.id)
+
         if not interaction.response.is_done():
             await interaction.response.send_message(msg, ephemeral=True)
         else:
@@ -578,11 +630,14 @@ class SessionsCog:
         await self.bot.refresh_dashboard(session.guild_id)
         await self.bot.refresh_hub(session.guild_id)
 
-    async def end_session_internal(self, interaction: discord.Interaction):
-        user_id = interaction.user.id
+    async def end_session_core(self, user_id: int, auto_reason: str | None = None) -> tuple[dict, discord.Embed, any] | None:
+        """
+        Finalizes an active/paused session in memory and DB, computes summaries,
+        dispatches to dedicated summary channel, checks daily goal, and returns (summary, embed, session).
+        """
         session = self.bot.active_sessions.pop(user_id, None)
         if not session:
-            return
+            return None
 
         # Finalize running segment if active
         if session.status == "active" and session.current_segment_id:
@@ -595,8 +650,20 @@ class SessionsCog:
         # Save to DB and retrieve summary metrics
         summary = await self.bot.db.end_session(session.session_id, session.accumulated_seconds)
 
+        # Fetch discord user object
+        user = self.bot.get_user(user_id)
+        if not user:
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except Exception:
+                class _FallbackUser:
+                    display_name = f"User {user_id}"
+                    display_avatar = discord.Object(id=user_id)
+                    display_avatar.url = ""
+                user = _FallbackUser()
+
         embed = build_session_summary_embed(
-            user=interaction.user,
+            user=user,
             subject=summary["subject"],
             topic=summary["topic"],
             total_seconds=summary["total_seconds"],
@@ -605,8 +672,56 @@ class SessionsCog:
             checkins_total=summary["checkins_total"],
             current_streak=summary["current_streak"],
             daily_total_seconds=summary["today_total_seconds"],
-            daily_goal_minutes=summary["daily_goal_minutes"]
+            daily_goal_minutes=summary["daily_goal_minutes"],
+            planned_minutes=summary.get("planned_minutes")
         )
+
+        if auto_reason:
+            embed.add_field(
+                name="🌙 Automatic Cutoff",
+                value=f"Session concluded automatically ({auto_reason}) to maintain timer precision.",
+                inline=False
+            )
+
+        # Post summary to the dedicated summary channel if configured
+        try:
+            summary_ch_id = await self.bot.db.get_summary_channel(session.guild_id)
+            if not summary_ch_id and self.bot.config.summary_channel_id:
+                summary_ch_id = self.bot.config.summary_channel_id
+
+            if summary_ch_id:
+                summary_ch = self.bot.get_channel(summary_ch_id)
+                if summary_ch and summary_ch.id != (session.thread_id or 0):
+                    await summary_ch.send(embed=embed)
+        except Exception as e:
+            print(f"Error posting to summary channel: {e}")
+
+        # Check if user reached their daily goal in this session
+        if summary["daily_goal_minutes"] > 0:
+            goal_secs = summary["daily_goal_minutes"] * 60
+            prev_total = summary["today_total_seconds"] - summary["total_seconds"]
+            # Only announce the exact session where they cross their target
+            if prev_total < goal_secs <= summary["today_total_seconds"]:
+                try:
+                    channel = self.bot.get_channel(session.channel_id)
+                    if channel:
+                        await channel.send(
+                            f"🏆 **Goal Achieved!** <@{user_id}> reached their daily study target of "
+                            f"**{format_duration(goal_secs)}** today! Outstanding commitment! 🔥 "
+                            f"*(Aiming higher? Use `/goal set` or the Hub to extend your goal!)*"
+                        )
+                except Exception:
+                    pass
+
+        return summary, embed, session
+
+    async def end_session_internal(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        result = await self.end_session_core(user_id)
+        if not result:
+            return
+
+        summary, embed, session = result
 
         # Handle thread cleanup and summary delivery
         if session.thread_id:
@@ -621,14 +736,12 @@ class SessionsCog:
                         pass
 
                     async def _delayed_thread_delete(th):
-                        import asyncio
                         await asyncio.sleep(30)
                         try:
                             await th.delete(reason="Tracger study session ended - throwaway cleanup")
                         except Exception:
                             pass
 
-                    import asyncio
                     asyncio.create_task(_delayed_thread_delete(thread))
                 else:
                     # User clicked End from the Hub panel or slash command outside the thread
@@ -638,13 +751,11 @@ class SessionsCog:
                             msg = await interaction.followup.send(embed=embed, wait=True)
                             if msg:
                                 async def _auto_dissolve_msg(m):
-                                    import asyncio
                                     await asyncio.sleep(15)
                                     try:
                                         await m.delete()
                                     except Exception:
                                         pass
-                                import asyncio
                                 asyncio.create_task(_auto_dissolve_msg(msg))
                         else:
                             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -669,29 +780,78 @@ class SessionsCog:
         await self.bot.refresh_dashboard(session.guild_id)
         await self.bot.refresh_hub(session.guild_id)
 
-        # Post summary to the dedicated summary channel if configured
-        try:
-            summary_ch_id = await self.bot.db.get_summary_channel(session.guild_id)
-            if not summary_ch_id and self.bot.config.summary_channel_id:
-                summary_ch_id = self.bot.config.summary_channel_id
+    async def auto_end_stale_sessions_at_2am(self):
+        """Automatically ends any lingering active or paused sessions at 2:00 AM IST to prevent runaway timers."""
+        active_user_ids = list(self.bot.active_sessions.keys())
+        if not active_user_ids:
+            return
 
-            if summary_ch_id:
-                summary_ch = self.bot.get_channel(summary_ch_id)
-                if summary_ch and summary_ch.id != (session.thread_id or 0):
-                    await summary_ch.send(embed=embed)
-        except Exception as e:
-            print(f"Error posting to summary channel: {e}")
+        print(f"⏰ [2:00 AM IST Cutoff] Automatically concluding {len(active_user_ids)} session(s)...")
+        guild_ids_to_refresh = set()
 
-        # Check if user reached their daily goal in this session
-        if summary["daily_goal_minutes"] > 0:
-            goal_secs = summary["daily_goal_minutes"] * 60
-            if summary["today_total_seconds"] >= goal_secs:
-                try:
-                    channel = self.bot.get_channel(session.channel_id)
-                    if channel:
-                        await channel.send(
-                            f"🏆 **Goal Achieved!** <@{user_id}> reached their daily study target of "
-                            f"**{format_duration(goal_secs)}** today! Outstanding commitment! 🔥"
-                        )
-                except Exception:
-                    pass
+        for uid in active_user_ids:
+            try:
+                session = self.bot.active_sessions.get(uid)
+                if not session:
+                    continue
+                thread_id = session.thread_id
+                guild_ids_to_refresh.add(session.guild_id)
+
+                result = await self.end_session_core(uid, auto_reason="2:00 AM IST Cutoff")
+                if not result:
+                    continue
+                summary, embed, sess = result
+
+                if thread_id:
+                    thread = self.bot.get_channel(thread_id)
+                    if not thread:
+                        try:
+                            thread = await self.bot.fetch_channel(thread_id)
+                        except Exception:
+                            thread = None
+                    if thread:
+                        try:
+                            await thread.send(content=f"<@{uid}>", embed=embed)
+                            await thread.send(
+                                "🌙 **2:00 AM IST Cutoff**: This session was automatically ended because the daily cycle has concluded. "
+                                "This temporary thread will self-destruct in 30 seconds."
+                            )
+                            async def _delayed_th_delete(th):
+                                await asyncio.sleep(30)
+                                try:
+                                    await th.delete(reason="Tracger 2:00 AM IST auto-end cleanup")
+                                except Exception:
+                                    pass
+                            asyncio.create_task(_delayed_th_delete(thread))
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"Error auto-ending session for user {uid}: {e}")
+
+        for gid in guild_ids_to_refresh:
+            await self.bot.refresh_dashboard(gid)
+            await self.bot.refresh_hub(gid)
+
+    async def _auto_end_schedule_loop(self):
+        """Runs indefinitely, firing every day at 2:00 AM IST (20:30 UTC) to auto-end unclosed sessions."""
+        await self.bot.wait_until_ready()
+
+        while not self.bot.is_closed():
+            now_utc = datetime.now(timezone.utc)
+            # 2:00 AM IST is 20:30 UTC
+            target_utc = now_utc.replace(hour=20, minute=30, second=0, microsecond=0)
+
+            if target_utc <= now_utc:
+                target_utc += timedelta(days=1)
+
+            sleep_seconds = (target_utc - now_utc).total_seconds()
+            print(f"⏰ Auto-end cutoff scheduled in {sleep_seconds / 3600:.2f} hours (at 2:00 AM IST)")
+
+            try:
+                await asyncio.sleep(sleep_seconds)
+                await self.auto_end_stale_sessions_at_2am()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Error in auto-end schedule loop: {e}")
+                await asyncio.sleep(60)

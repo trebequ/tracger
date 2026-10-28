@@ -54,8 +54,8 @@ class HubStudyModal(ui.Modal, title="📖 Start Study Session"):
 
 class HubGoalModal(ui.Modal, title="🎯 Set Daily Study Goal"):
     goal_input = ui.TextInput(
-        label="Daily Target",
-        placeholder="e.g. 3h, 2h30m, 90m",
+        label="Today's Target",
+        placeholder="e.g. 3h, 90m, +1h (or type 'clear' to reset)",
         required=True,
         max_length=20
     )
@@ -66,16 +66,34 @@ class HubGoalModal(ui.Modal, title="🎯 Set Daily Study Goal"):
 
     async def on_submit(self, interaction: discord.Interaction):
         from bot.helpers import parse_duration
-        minutes = parse_duration(self.goal_input.value.strip())
+        val = self.goal_input.value.strip().lower()
+        if val in ("0", "clear", "reset", "off", "none", "remove", "0m", "0h"):
+            await self.bot.db.set_daily_goal(interaction.user.id, 0)
+            await interaction.response.send_message("🧹 Today's study target has been cleared.", ephemeral=True)
+            return
+
+        if val.startswith("+"):
+            delta_mins = parse_duration(val[1:])
+            if not delta_mins or delta_mins <= 0:
+                await interaction.response.send_message("❌ Invalid extension format. Please specify e.g. `+1h` or `+30m`.", ephemeral=True)
+                return
+            current_goal = await self.bot.db.get_daily_goal(interaction.user.id)
+            if current_goal <= 0:
+                today_secs = await self.bot.db.get_today_total_seconds(interaction.user.id)
+                current_goal = max(0, today_secs // 60)
+            minutes = current_goal + delta_mins
+        else:
+            minutes = parse_duration(val)
+
         if not minutes or minutes <= 0:
             await interaction.response.send_message(
-                "❌ Invalid format. Please specify e.g. `2h`, `1h30m`, or `90m`.",
+                "❌ Invalid format. Please specify e.g. `2h`, `1h30m`, `+1h` (or type `clear` to reset).",
                 ephemeral=True
             )
             return
         await self.bot.db.set_daily_goal(interaction.user.id, minutes)
         await interaction.response.send_message(
-            f"🎯 Daily study target set to **{format_duration(minutes * 60)}**! Go crush it! 💪",
+            f"🎯 Today's study target set to **{format_duration(minutes * 60)}**! Go crush it! 💪",
             ephemeral=True
         )
 

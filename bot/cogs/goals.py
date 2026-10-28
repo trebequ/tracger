@@ -12,20 +12,38 @@ class GoalsCog:
 
         goal_group = app_commands.Group(name="goal", description="Manage personal daily study targets")
 
-        @goal_group.command(name="set", description="Set your daily study goal")
-        @app_commands.describe(target="Daily target duration (e.g. 3h, 2h30m, 90m)")
+        @goal_group.command(name="set", description="Set or extend your daily study goal (e.g. 3h, 90m, or +1h)")
+        @app_commands.describe(target="Daily target duration (e.g. 3h, 2h30m, 90m, +1h, or 'clear')")
         async def goal_set(interaction: discord.Interaction, target: str):
-            minutes = parse_duration(target)
+            val = target.strip().lower()
+            if val in ("0", "clear", "reset", "off", "none", "remove", "0m", "0h"):
+                await self.bot.db.set_daily_goal(interaction.user.id, 0)
+                await interaction.response.send_message("🧹 Today's study target has been cleared.", ephemeral=True)
+                return
+
+            if val.startswith("+"):
+                delta_mins = parse_duration(val[1:])
+                if not delta_mins or delta_mins <= 0:
+                    await interaction.response.send_message("❌ Invalid extension format. Please specify e.g. `+1h` or `+30m`.", ephemeral=True)
+                    return
+                current_goal = await self.bot.db.get_daily_goal(interaction.user.id)
+                if current_goal <= 0:
+                    today_secs = await self.bot.db.get_today_total_seconds(interaction.user.id)
+                    current_goal = max(0, today_secs // 60)
+                minutes = current_goal + delta_mins
+            else:
+                minutes = parse_duration(val)
+
             if not minutes or minutes <= 0:
                 await interaction.response.send_message(
-                    "❌ Invalid format. Please specify e.g. `2h`, `1h30m`, or `90m`.",
+                    "❌ Invalid format. Please specify e.g. `2h`, `1h30m`, `+1h` (or type `clear`).",
                     ephemeral=True
                 )
                 return
 
             await self.bot.db.set_daily_goal(interaction.user.id, minutes)
             await interaction.response.send_message(
-                f"🎯 Daily study target set to **{format_duration(minutes * 60)}**! Go crush it! 💪",
+                f"🎯 Today's study target set to **{format_duration(minutes * 60)}**! Go crush it! 💪",
                 ephemeral=True
             )
 
@@ -33,8 +51,10 @@ class GoalsCog:
         async def goal_check(interaction: discord.Interaction):
             goal_mins = await self.bot.db.get_daily_goal(interaction.user.id)
             if goal_mins <= 0:
+                today_secs = await self.bot.db.get_today_total_seconds(interaction.user.id)
+                today_dur = format_duration(today_secs)
                 await interaction.response.send_message(
-                    "ℹ️ You haven't set a daily target yet! Use `/goal set 2h` to set one.",
+                    f"ℹ️ You haven't set a goal for today yet! You've focused for **{today_dur}** so far today. Use `/goal set 2h` or the Hub to set a target.",
                     ephemeral=True
                 )
                 return
@@ -56,7 +76,9 @@ class GoalsCog:
             )
 
             if today_secs >= goal_secs:
-                embed.description = "🎉 **Target reached today!** Fantastic consistency!"
+                overtime = today_secs - goal_secs
+                bonus_str = f" (+{format_duration(overtime)} bonus focus!)" if overtime > 0 else ""
+                embed.description = f"🎉 **Target reached today!** Fantastic consistency!{bonus_str}"
             else:
                 remaining = goal_secs - today_secs
                 embed.description = f"**{format_duration(remaining)}** remaining to reach your goal."
