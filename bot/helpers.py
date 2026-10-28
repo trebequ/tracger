@@ -102,7 +102,9 @@ def build_session_start_embed(
     topic: str | None,
     planned_minutes: int | None,
     status: str = "active",
-    elapsed_seconds: int = 0
+    start_time: datetime | None = None,
+    elapsed_seconds: int = 0,
+    daily_goal_minutes: int | None = None
 ) -> discord.Embed:
     is_active = (status == "active")
     color = COLOR_ACTIVE if is_active else COLOR_PAUSED
@@ -120,9 +122,17 @@ def build_session_start_embed(
     embed.add_field(name="📝 Topic", value=topic or "*General*", inline=True)
     if planned_minutes:
         embed.add_field(name="🎯 Planned Duration", value=f"{format_duration(planned_minutes * 60)}", inline=True)
+    if daily_goal_minutes and daily_goal_minutes > 0:
+        embed.add_field(name="🏆 Daily Goal", value=f"{format_duration(daily_goal_minutes * 60)}", inline=True)
     embed.add_field(name="⏱️ Status", value=status_text, inline=False)
-    if elapsed_seconds > 0:
-        embed.add_field(name="⏳ Time Tracked", value=f"**{format_duration(elapsed_seconds)}**", inline=True)
+
+    if is_active and start_time:
+        start_unix = int(start_time.timestamp())
+        embed.add_field(name="⏳ Time Tracked", value=f"Started <t:{start_unix}:R>", inline=True)
+    elif elapsed_seconds > 0:
+        state_note = "(Running)" if is_active else "(Paused)"
+        embed.add_field(name="⏳ Time Tracked", value=f"**{format_duration(elapsed_seconds)}** {state_note}", inline=True)
+
     embed.set_footer(text="Tracger • Use the buttons below or slash commands to control your timer")
     return embed
 

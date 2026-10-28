@@ -63,6 +63,7 @@ class TracgerBot(discord.Client):
         from bot.cogs.dashboard import DashboardCog
         from bot.cogs.daily_report import DailyReportCog
         from bot.cogs.study_hub import StudyHubCog
+        from bot.cogs.motivation import MotivationCog
 
         self.sessions_cog = SessionsCog(self)
         self.checkin_cog = CheckinCog(self)
@@ -71,6 +72,7 @@ class TracgerBot(discord.Client):
         self.dashboard_cog = DashboardCog(self)
         self.daily_report_cog = DailyReportCog(self)
         self.study_hub_cog = StudyHubCog(self)
+        self.motivation_cog = MotivationCog(self)
 
         await self.sessions_cog.setup()
         await self.checkin_cog.setup()
@@ -79,6 +81,7 @@ class TracgerBot(discord.Client):
         await self.dashboard_cog.setup()
         await self.daily_report_cog.setup()
         await self.study_hub_cog.setup()
+        await self.motivation_cog.setup()
 
         # 3. Slash command syncing
         if self.config.guild_id:

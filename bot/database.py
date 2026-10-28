@@ -6,11 +6,21 @@ import aiosqlite
 IST_OFFSET = timezone(timedelta(hours=5, minutes=30))
 
 def get_today_iso_range() -> tuple[str, str]:
-    """Returns the ISO start timestamp in UTC for today in IST (UTC+5:30) and the date string."""
+    """
+    Returns the ISO start timestamp in UTC for the current 2:00 AM IST study day boundary,
+    and the date string (YYYY-MM-DD).
+    The daily study cycle runs from 2:00 AM IST to 2:00 AM IST the next morning.
+    """
     now_ist = datetime.now(IST_OFFSET)
-    today_start_ist = datetime(now_ist.year, now_ist.month, now_ist.day, 0, 0, 0, tzinfo=IST_OFFSET)
-    today_start_utc = today_start_ist.astimezone(timezone.utc).isoformat()
-    return today_start_utc, now_ist.date().isoformat()
+    # If before 2:00 AM IST, the session belongs to yesterday's study cycle
+    if now_ist.hour < 2:
+        study_date = (now_ist - timedelta(days=1)).date()
+    else:
+        study_date = now_ist.date()
+
+    day_start_ist = datetime(study_date.year, study_date.month, study_date.day, 2, 0, 0, tzinfo=IST_OFFSET)
+    day_start_utc = day_start_ist.astimezone(timezone.utc).isoformat()
+    return day_start_utc, study_date.isoformat()
 
 class Database:
     def __init__(self, db_path: str = "data/tracger.db"):
@@ -112,6 +122,14 @@ class Database:
             # Dedicated daily log & backup channels per guild
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS daily_log_channels (
+                    guild_id   INTEGER PRIMARY KEY,
+                    channel_id INTEGER NOT NULL
+                );
+            """)
+
+            # Dedicated motivational quirky quote channel per guild
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS motivation_channels (
                     guild_id   INTEGER PRIMARY KEY,
                     channel_id INTEGER NOT NULL
                 );
@@ -385,7 +403,8 @@ class Database:
     async def get_user_stats(self, user_id: int) -> dict:
         today_start_utc, today_str = get_today_iso_range()
         now_ist = datetime.now(IST_OFFSET)
-        week_start_ist = datetime(now_ist.year, now_ist.month, now_ist.day, 0, 0, 0, tzinfo=IST_OFFSET) - timedelta(days=now_ist.weekday())
+        study_date = (now_ist - timedelta(days=1)).date() if now_ist.hour < 2 else now_ist.date()
+        week_start_ist = datetime(study_date.year, study_date.month, study_date.day, 2, 0, 0, tzinfo=IST_OFFSET) - timedelta(days=study_date.weekday())
         week_start_utc = week_start_ist.astimezone(timezone.utc).isoformat()
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -464,7 +483,8 @@ class Database:
     async def get_leaderboard(self, guild_id: int, period: str = "week") -> list[dict]:
         today_start_utc, _ = get_today_iso_range()
         now_ist = datetime.now(IST_OFFSET)
-        week_start_ist = datetime(now_ist.year, now_ist.month, now_ist.day, 0, 0, 0, tzinfo=IST_OFFSET) - timedelta(days=now_ist.weekday())
+        study_date = (now_ist - timedelta(days=1)).date() if now_ist.hour < 2 else now_ist.date()
+        week_start_ist = datetime(study_date.year, study_date.month, study_date.day, 2, 0, 0, tzinfo=IST_OFFSET) - timedelta(days=study_date.weekday())
         week_start_utc = week_start_ist.astimezone(timezone.utc).isoformat()
 
         if period == "today":
@@ -615,6 +635,33 @@ class Database:
             rows = await cursor.fetchall()
             return [(r["guild_id"], r["channel_id"]) for r in rows]
 
+    async def set_motivation_channel(self, guild_id: int, channel_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO motivation_channels (guild_id, channel_id)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id;
+            """, (guild_id, channel_id))
+            await db.commit()
+
+    async def get_motivation_channel(self, guild_id: int) -> int | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT channel_id FROM motivation_channels WHERE guild_id = ?;
+            """, (guild_id,))
+            row = await cursor.fetchone()
+            return row["channel_id"] if row else None
+
+    async def get_all_motivation_channels(self) -> list[tuple[int, int]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT guild_id, channel_id FROM motivation_channels;
+            """)
+            rows = await cursor.fetchall()
+            return [(r["guild_id"], r["channel_id"]) for r in rows]
+
     async def get_latest_completed_session(self, user_id: int) -> dict | None:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -672,7 +719,7 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             data = {}
-            for table in ["users", "sessions", "segments", "checkins"]:
+            for table in ["users", "sessions", "segments", "checkins", "summary_channels", "daily_log_channels", "motivation_channels"]:
                 cur = await db.execute(f"SELECT * FROM {table};")
                 rows = await cur.fetchall()
                 data[table] = [dict(r) for r in rows]
@@ -682,7 +729,7 @@ class Database:
         """Imports dataset into database."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = OFF;")
-            for table in ["users", "sessions", "segments", "checkins"]:
+            for table in ["users", "sessions", "segments", "checkins", "summary_channels", "daily_log_channels", "motivation_channels"]:
                 rows = data.get(table, [])
                 if not rows:
                     continue
