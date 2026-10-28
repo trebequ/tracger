@@ -69,6 +69,8 @@ class HubGoalModal(ui.Modal, title="🎯 Set Daily Study Goal"):
         val = self.goal_input.value.strip().lower()
         if val in ("0", "clear", "reset", "off", "none", "remove", "0m", "0h"):
             await self.bot.db.set_daily_goal(interaction.user.id, 0)
+            if hasattr(self.bot, "sessions_cog"):
+                await self.bot.sessions_cog.update_thread_control_panel(interaction.user.id)
             await interaction.response.send_message("🧹 Today's study target has been cleared.", ephemeral=True)
             return
 
@@ -92,6 +94,8 @@ class HubGoalModal(ui.Modal, title="🎯 Set Daily Study Goal"):
             )
             return
         await self.bot.db.set_daily_goal(interaction.user.id, minutes)
+        if hasattr(self.bot, "sessions_cog"):
+            await self.bot.sessions_cog.update_thread_control_panel(interaction.user.id)
         await interaction.response.send_message(
             f"🎯 Today's study target set to **{format_duration(minutes * 60)}**! Go crush it! 💪",
             ephemeral=True

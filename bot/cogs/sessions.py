@@ -1,3 +1,4 @@
+import re
 import random
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -432,6 +433,14 @@ class SessionsCog:
     ):
         from bot.client import SessionState
 
+        # Smart fallback: If duration was omitted but topic is formatted like a duration (e.g. '6h', '45m', '1h30m', '90')
+        if topic and not duration_raw:
+            cleaned_topic = topic.strip().lower()
+            parsed_test = parse_duration(cleaned_topic)
+            if parsed_test and (re.fullmatch(r"(\d+(?:\.\d+)?\s*(?:h(?:ours?)?|m(?:in(?:ute)?s?)?|\b))+", cleaned_topic) or cleaned_topic.isdigit()):
+                duration_raw = topic
+                topic = None
+
         planned_mins = parse_duration(duration_raw)
         user = interaction.user
         guild_id = interaction.guild_id or 0
@@ -475,8 +484,20 @@ class SessionsCog:
         # Schedule check-in reminders
         self.bot.checkin_cog.schedule_reminder(state)
 
+        # Fetch today's goal if any
+        daily_goal_mins = await self.bot.db.get_daily_goal(user.id)
+
         # Send start confirmation
-        embed = build_session_start_embed(user, subject, topic, planned_mins)
+        embed = build_session_start_embed(
+            user=user,
+            subject=subject,
+            topic=topic,
+            planned_minutes=planned_mins,
+            status="active",
+            start_time=now,
+            elapsed_seconds=0,
+            daily_goal_minutes=daily_goal_mins
+        )
 
         if thread:
             # Acknowledge the interaction with a pointer to the thread
@@ -532,13 +553,16 @@ class SessionsCog:
             if not user:
                 user = await self.bot.fetch_user(user_id)
 
+            daily_goal_mins = await self.bot.db.get_daily_goal(user_id)
             embed = build_session_start_embed(
                 user=user,
                 subject=session.subject,
                 topic=session.topic,
                 planned_minutes=session.planned_minutes,
                 status=session.status,
-                elapsed_seconds=session.get_current_elapsed_seconds()
+                start_time=session.segment_start_time if session.status == "active" else None,
+                elapsed_seconds=session.get_current_elapsed_seconds(),
+                daily_goal_minutes=daily_goal_mins
             )
             view = ThreadControlView(self, user_id, status=session.status)
             await msg.edit(embed=embed, view=view)
