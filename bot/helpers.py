@@ -81,9 +81,10 @@ def progress_bar(current: float, total: float, length: int = 12) -> str:
     if total <= 0:
         ratio = 0.0
     else:
-        ratio = min(max(current / total, 0.0), 1.0)
+        ratio = current / total
 
-    filled = int(round(length * ratio))
+    bar_ratio = min(max(ratio, 0.0), 1.0)
+    filled = int(round(length * bar_ratio))
     bar = "█" * filled + "░" * (length - filled)
     percent = int(ratio * 100)
     return f"`[{bar}]` {percent}%"
@@ -99,12 +100,19 @@ def build_session_start_embed(
     user: discord.User | discord.Member,
     subject: str,
     topic: str | None,
-    planned_minutes: int | None
+    planned_minutes: int | None,
+    status: str = "active",
+    elapsed_seconds: int = 0
 ) -> discord.Embed:
+    is_active = (status == "active")
+    color = COLOR_ACTIVE if is_active else COLOR_PAUSED
+    status_text = "🟢 **Running**" if is_active else "⏸️ **Paused**"
+    title_text = "📖 Study Session Commenced" if is_active else "⏸️ Study Session Paused"
+
     embed = discord.Embed(
-        title="📖 Study Session Commenced",
-        description=f"**{user.display_name}** has started focusing.",
-        color=COLOR_ACTIVE,
+        title=title_text,
+        description=f"**{user.display_name}** has started focusing." if is_active else f"**{user.display_name}**'s timer is currently paused.",
+        color=color,
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
@@ -112,7 +120,9 @@ def build_session_start_embed(
     embed.add_field(name="📝 Topic", value=topic or "*General*", inline=True)
     if planned_minutes:
         embed.add_field(name="🎯 Planned Duration", value=f"{format_duration(planned_minutes * 60)}", inline=True)
-    embed.add_field(name="⏱️ Status", value="🟢 **Running**", inline=False)
+    embed.add_field(name="⏱️ Status", value=status_text, inline=False)
+    if elapsed_seconds > 0:
+        embed.add_field(name="⏳ Time Tracked", value=f"**{format_duration(elapsed_seconds)}**", inline=True)
     embed.set_footer(text="Tracger • Use the buttons below or slash commands to control your timer")
     return embed
 
@@ -166,7 +176,8 @@ def build_session_summary_embed(
     checkins_total: int,
     current_streak: int,
     daily_total_seconds: int,
-    daily_goal_minutes: int
+    daily_goal_minutes: int,
+    planned_minutes: int | None = None
 ) -> discord.Embed:
     embed = discord.Embed(
         title="🎉 Session Finished!",
@@ -188,14 +199,35 @@ def build_session_summary_embed(
     streak_str = f"🔥 **{current_streak}** day{'s' if current_streak != 1 else ''}"
     embed.add_field(name="Streak", value=streak_str, inline=True)
 
+    if planned_minutes and planned_minutes > 0:
+        p_secs = planned_minutes * 60
+        p_pct = int((total_seconds / p_secs) * 100)
+        p_bar = progress_bar(total_seconds, p_secs)
+        p_note = "✅ Target reached!" if total_seconds >= p_secs else f"{format_duration(p_secs - total_seconds)} shy of target"
+        embed.add_field(
+            name="🎯 Session Planned Target",
+            value=f"**{format_duration(total_seconds)}** / {format_duration(p_secs)} ({p_pct}%) • {p_note}\n{p_bar}",
+            inline=False
+        )
+
     if daily_goal_minutes > 0:
         goal_secs = daily_goal_minutes * 60
         bar = progress_bar(daily_total_seconds, goal_secs)
-        embed.add_field(
-            name="🎯 Today's Goal Progress",
-            value=f"{format_duration(daily_total_seconds)} / {format_duration(goal_secs)}\n{bar}",
-            inline=False
-        )
+        if daily_total_seconds >= goal_secs:
+            overtime_secs = daily_total_seconds - goal_secs
+            bonus_str = f" (+{format_duration(overtime_secs)} bonus focus!)" if overtime_secs > 0 else ""
+            embed.add_field(
+                name="🎯 Daily Study Goal",
+                value=f"**{format_duration(daily_total_seconds)}** / {format_duration(goal_secs)} — 🎉 **Target Met!**{bonus_str}\n{bar}",
+                inline=False
+            )
+        else:
+            remaining_secs = goal_secs - daily_total_seconds
+            embed.add_field(
+                name="🎯 Daily Study Goal",
+                value=f"**{format_duration(daily_total_seconds)}** / {format_duration(goal_secs)} (*{format_duration(remaining_secs)} left today*)\n{bar}",
+                inline=False
+            )
     else:
         embed.add_field(name="📅 Today Total", value=f"{format_duration(daily_total_seconds)}", inline=True)
 

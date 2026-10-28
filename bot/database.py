@@ -3,6 +3,15 @@ import json
 from datetime import datetime, timezone, timedelta
 import aiosqlite
 
+IST_OFFSET = timezone(timedelta(hours=5, minutes=30))
+
+def get_today_iso_range() -> tuple[str, str]:
+    """Returns the ISO start timestamp in UTC for today in IST (UTC+5:30) and the date string."""
+    now_ist = datetime.now(IST_OFFSET)
+    today_start_ist = datetime(now_ist.year, now_ist.month, now_ist.day, 0, 0, 0, tzinfo=IST_OFFSET)
+    today_start_utc = today_start_ist.astimezone(timezone.utc).isoformat()
+    return today_start_utc, now_ist.date().isoformat()
+
 class Database:
     def __init__(self, db_path: str = "data/tracger.db"):
         self.db_path = db_path
@@ -19,12 +28,19 @@ class Database:
                     user_id            INTEGER PRIMARY KEY,
                     display_name       TEXT NOT NULL,
                     daily_goal_minutes INTEGER DEFAULT 0,
+                    daily_goal_date    TEXT,
                     current_streak     INTEGER DEFAULT 0,
                     longest_streak     INTEGER DEFAULT 0,
                     last_study_date    TEXT,
                     created_at         TEXT DEFAULT (datetime('now'))
                 );
             """)
+
+            # Ensure users table has daily_goal_date column if upgrading an existing db
+            cursor = await db.execute("PRAGMA table_info(users);")
+            user_cols = [row[1] for row in await cursor.fetchall()]
+            if "daily_goal_date" not in user_cols:
+                await db.execute("ALTER TABLE users ADD COLUMN daily_goal_date TEXT;")
 
             # Study sessions
             await db.execute("""
@@ -209,7 +225,7 @@ class Database:
 
             # Fetch session info
             cursor = await db.execute("""
-                SELECT user_id, guild_id, subject, topic, start_time, total_seconds
+                SELECT user_id, guild_id, subject, topic, planned_minutes, start_time, total_seconds
                 FROM sessions WHERE session_id = ?;
             """, (session_id,))
             session_row = await cursor.fetchone()
@@ -244,6 +260,7 @@ class Database:
             "guild_id": session_row["guild_id"],
             "subject": session_row["subject"],
             "topic": session_row["topic"],
+            "planned_minutes": session_row["planned_minutes"],
             "total_seconds": final_total_seconds,
             "segment_count": segment_count,
             "checkins_done": done_checkins,
@@ -289,9 +306,9 @@ class Database:
 
     async def update_streak(self, user_id: int) -> tuple[int, int]:
         """Calculates and updates consecutive day streak for a user."""
-        today = datetime.now(timezone.utc).date()
-        today_str = today.isoformat()
-        yesterday_str = (today - timedelta(days=1)).isoformat()
+        today_start_utc, today_str = get_today_iso_range()
+        now_ist = datetime.now(IST_OFFSET)
+        yesterday_str = (now_ist.date() - timedelta(days=1)).isoformat()
 
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -328,52 +345,67 @@ class Database:
             return current, longest
 
     async def set_daily_goal(self, user_id: int, minutes: int):
+        today_start_utc, today_str = get_today_iso_range()
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                UPDATE users SET daily_goal_minutes = ? WHERE user_id = ?;
-            """, (max(0, minutes), user_id))
+            if minutes <= 0:
+                await db.execute("""
+                    UPDATE users SET daily_goal_minutes = 0, daily_goal_date = NULL WHERE user_id = ?;
+                """, (user_id,))
+            else:
+                await db.execute("""
+                    UPDATE users SET daily_goal_minutes = ?, daily_goal_date = ? WHERE user_id = ?;
+                """, (minutes, today_str, user_id))
             await db.commit()
 
     async def get_daily_goal(self, user_id: int) -> int:
+        today_start_utc, today_str = get_today_iso_range()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT daily_goal_minutes FROM users WHERE user_id = ?;", (user_id,))
+            cursor = await db.execute("SELECT daily_goal_minutes, daily_goal_date FROM users WHERE user_id = ?;", (user_id,))
             row = await cursor.fetchone()
-            return row["daily_goal_minutes"] if row and row["daily_goal_minutes"] else 0
+            if not row or not row["daily_goal_minutes"]:
+                return 0
+            # If the goal was set on an earlier day (or has no date attached), it automatically refreshes
+            if not row["daily_goal_date"] or row["daily_goal_date"] != today_str:
+                return 0
+            return row["daily_goal_minutes"]
 
     async def get_today_total_seconds(self, user_id: int) -> int:
-        today_start = datetime.now(timezone.utc).date().isoformat() + "T00:00:00"
+        today_start_utc, _ = get_today_iso_range()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("""
                 SELECT SUM(total_seconds) as total
                 FROM sessions
                 WHERE user_id = ? AND start_time >= ?;
-            """, (user_id, today_start))
+            """, (user_id, today_start_utc))
             row = await cursor.fetchone()
             return row["total"] if row and row["total"] else 0
 
     async def get_user_stats(self, user_id: int) -> dict:
-        now = datetime.now(timezone.utc)
-        today_start = now.date().isoformat() + "T00:00:00"
-        # Start of this week (Monday)
-        week_start = (now.date() - timedelta(days=now.weekday())).isoformat() + "T00:00:00"
+        today_start_utc, today_str = get_today_iso_range()
+        now_ist = datetime.now(IST_OFFSET)
+        week_start_ist = datetime(now_ist.year, now_ist.month, now_ist.day, 0, 0, 0, tzinfo=IST_OFFSET) - timedelta(days=now_ist.weekday())
+        week_start_utc = week_start_ist.astimezone(timezone.utc).isoformat()
 
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
 
             # User record
             cursor = await db.execute("""
-                SELECT display_name, daily_goal_minutes, current_streak, longest_streak
+                SELECT display_name, daily_goal_minutes, daily_goal_date, current_streak, longest_streak
                 FROM users WHERE user_id = ?;
             """, (user_id,))
             user_row = await cursor.fetchone()
+            goal_mins = 0
+            if user_row and user_row["daily_goal_minutes"] and user_row["daily_goal_date"] == today_str:
+                goal_mins = user_row["daily_goal_minutes"]
 
             # Today total
             cursor = await db.execute("""
                 SELECT SUM(total_seconds) as total FROM sessions
                 WHERE user_id = ? AND start_time >= ?;
-            """, (user_id, today_start))
+            """, (user_id, today_start_utc))
             today_row = await cursor.fetchone()
             today_sec = today_row["total"] if today_row and today_row["total"] else 0
 
@@ -381,7 +413,7 @@ class Database:
             cursor = await db.execute("""
                 SELECT SUM(total_seconds) as total FROM sessions
                 WHERE user_id = ? AND start_time >= ?;
-            """, (user_id, week_start))
+            """, (user_id, week_start_utc))
             week_row = await cursor.fetchone()
             week_sec = week_row["total"] if week_row and week_row["total"] else 0
 
@@ -417,7 +449,7 @@ class Database:
 
         return {
             "display_name": user_row["display_name"] if user_row else "Unknown",
-            "daily_goal_minutes": user_row["daily_goal_minutes"] if user_row else 0,
+            "daily_goal_minutes": goal_mins,
             "current_streak": user_row["current_streak"] if user_row else 0,
             "longest_streak": user_row["longest_streak"] if user_row else 0,
             "today_seconds": today_sec,
@@ -430,11 +462,15 @@ class Database:
         }
 
     async def get_leaderboard(self, guild_id: int, period: str = "week") -> list[dict]:
-        now = datetime.now(timezone.utc)
+        today_start_utc, _ = get_today_iso_range()
+        now_ist = datetime.now(IST_OFFSET)
+        week_start_ist = datetime(now_ist.year, now_ist.month, now_ist.day, 0, 0, 0, tzinfo=IST_OFFSET) - timedelta(days=now_ist.weekday())
+        week_start_utc = week_start_ist.astimezone(timezone.utc).isoformat()
+
         if period == "today":
-            start_iso = now.date().isoformat() + "T00:00:00"
+            start_iso = today_start_utc
         elif period == "week":
-            start_iso = (now.date() - timedelta(days=now.weekday())).isoformat() + "T00:00:00"
+            start_iso = week_start_utc
         else: # all-time
             start_iso = "1970-01-01T00:00:00"
 
@@ -583,7 +619,7 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("""
-                SELECT session_id, user_id, guild_id, subject, topic, total_seconds, start_time, end_time
+                SELECT session_id, user_id, guild_id, subject, topic, planned_minutes, total_seconds, start_time, end_time
                 FROM sessions
                 WHERE user_id = ? AND status = 'completed'
                 ORDER BY session_id DESC LIMIT 1;
@@ -620,6 +656,7 @@ class Database:
             "guild_id": session_row["guild_id"],
             "subject": session_row["subject"],
             "topic": session_row["topic"],
+            "planned_minutes": session_row["planned_minutes"],
             "total_seconds": session_row["total_seconds"],
             "segment_count": segment_count,
             "checkins_done": done_checkins,

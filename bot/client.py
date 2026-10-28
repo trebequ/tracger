@@ -23,6 +23,8 @@ class SessionState:
     checkin_task: asyncio.Task | None = None
     latest_checkin_id: int | None = None
     thread_id: int | None = None
+    control_message_id: int | None = None
+    auto_paused_by_vc: bool = False
     checkin_count: int = 0
     missed_checkins: int = 0
 
@@ -103,7 +105,7 @@ class TracgerBot(discord.Client):
         await self.change_presence(status=discord.Status.online, activity=activity)
 
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        """Monitors when a user leaves voice channels during an active study session."""
+        """Monitors when a user leaves or joins voice channels during a study session."""
         if member.bot:
             return
 
@@ -112,28 +114,46 @@ class TracgerBot(discord.Client):
         if not session:
             return
 
-        # User was in a voice channel and left completely
-        if before.channel is not None and after.channel is None:
+        is_afk_before = (before.channel is not None and member.guild.afk_channel is not None and before.channel.id == member.guild.afk_channel.id)
+        is_afk_after = (after.channel is not None and member.guild.afk_channel is not None and after.channel.id == member.guild.afk_channel.id)
+
+        left_vc = (before.channel is not None and not is_afk_before) and (after.channel is None or is_afk_after)
+        joined_vc = (before.channel is None or is_afk_before) and (after.channel is not None and not is_afk_after)
+
+        target_channel = self.get_channel(session.thread_id) if session.thread_id else self.get_channel(session.channel_id)
+
+        if left_vc:
             if session.status == "active":
-                # Auto-pause to preserve accuracy
+                session.auto_paused_by_vc = True
                 await self.sessions_cog.pause_session_internal(member.id, reason="Left voice channel")
-                # Send pause notification to thread if available, else original channel
-                target_channel = None
-                if session.thread_id:
-                    target_channel = self.get_channel(session.thread_id)
-                if not target_channel:
-                    target_channel = self.get_channel(session.channel_id)
                 if target_channel:
                     try:
                         await target_channel.send(
                             f"⏸️ **{member.display_name}** left the voice channel. "
                             f"Your study timer has been automatically **paused**! "
-                            f"Hop back in and use `/resume` whenever you're ready.",
+                            f"Hop back in and it will automatically **resume** (or click Resume below).",
                             delete_after=120
                         )
                     except Exception:
                         pass
                 await self.refresh_dashboard(session.guild_id)
+                await self.refresh_hub(session.guild_id)
+
+        elif joined_vc:
+            if session.status == "paused":
+                session.auto_paused_by_vc = False
+                await self.sessions_cog.resume_session_internal(member.id)
+                if target_channel:
+                    try:
+                        await target_channel.send(
+                            f"▶️ **{member.display_name}** rejoined voice! "
+                            f"Your study timer has automatically **resumed**! Let's get focused. 💪",
+                            delete_after=120
+                        )
+                    except Exception:
+                        pass
+                await self.refresh_dashboard(session.guild_id)
+                await self.refresh_hub(session.guild_id)
 
     async def refresh_dashboard(self, guild_id: int):
         """Notifies the dashboard cog to re-render the live active study board."""
